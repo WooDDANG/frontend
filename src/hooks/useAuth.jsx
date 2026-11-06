@@ -127,7 +127,12 @@ export function AuthProvider({ children }) {
         tokenStore.set(result);
         setExpiresAt(result.expiresAt);
         setUser(result.user);
-        await loadGuilds();
+        if (Array.isArray(result.guilds)) {
+          setGuilds(result.guilds);
+          setSelectedGuildId((current) => result.guilds.some((g) => g.id === current) ? current : result.guilds[0]?.id ?? null);
+        } else {
+          await loadGuilds();
+        }
         setStatus('authenticated');
         return result.user;
       } catch (err) {
