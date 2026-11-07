@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { invalidateRequestScope, onGuildAccessChanged, onUnauthorized } from '../api/client.js';
+import { invalidateAuthScope, invalidateRequestScope, onGuildAccessChanged, onUnauthorized, setWorkspaceRequestsBlocked } from '../api/client.js';
 import { authApi } from '../api/endpoints.js';
 import { ApiError, toApiError } from '../api/errors.js';
 import { canManageGuild } from '../api/models.js';
@@ -12,8 +12,14 @@ const savedSelection = (user) => {
   try { return localStorage.getItem(selectionKey(user)); } catch { return null; }
 };
 
+/** URL에 실제 OAuth 콜백 정보가 있는지 확인한다. 불완전한 state만으로 복원을 생략하지 않는다. */
+export const hasOAuthParams = () => {
+  const params = new URLSearchParams(window.location.search);
+  return params.has('state') && (params.has('code') || params.has('error'));
+};
+
 export function AuthProvider({ children }) {
-  const callbackAtMount = useRef(new URLSearchParams(window.location.search).has('state'));
+  const callbackAtMount = useRef(hasOAuthParams());
   const [status, setStatus] = useState('checking');
   const [user, setUser] = useState(null);
   const [guilds, setGuilds] = useState([]);
@@ -28,9 +34,11 @@ export function AuthProvider({ children }) {
   const currentUser = useRef(null);
   const pendingGuilds = useRef(null);
   const guildController = useRef(null);
+  const preferredGuild = useRef(null);
 
-  const clearScope = useCallback(() => {
-    invalidateRequestScope();
+  const clearScope = useCallback((authenticationChanged = false) => {
+    if (authenticationChanged) invalidateAuthScope();
+    else invalidateRequestScope();
     setScopeKey((n) => n + 1);
   }, []);
 
@@ -39,7 +47,9 @@ export function AuthProvider({ children }) {
     guildController.current?.abort();
     pendingGuilds.current = null;
     currentUser.current = null;
-    clearScope();
+    preferredGuild.current = null;
+    setWorkspaceRequestsBlocked(true);
+    clearScope(true);
     tokenStore.clear();
     setUser(null); setGuilds([]); setSelectedGuildId(null);
     setGuildSelection({ status: 'unavailable', checkedAt: null });
@@ -51,20 +61,26 @@ export function AuthProvider({ children }) {
     const list = selection.status === 'ready' && Array.isArray(result.guilds) ? result.guilds : [];
     setGuildSelection(selection);
     setGuilds(list);
-    if (selection.status === 'ready') setSelectedGuildId((previous) => {
-      const preferred = restore ? savedSelection(account) : previous;
-      return list.some((g) => g.id === preferred) ? preferred : list[0]?.id ?? null;
-    });
+    if (selection.status === 'ready') {
+      const preferred = restore ? savedSelection(account) : preferredGuild.current;
+      const next = list.some((g) => g.id === preferred) ? preferred : list[0]?.id ?? null;
+      if (next !== preferredGuild.current) clearScope();
+      preferredGuild.current = next;
+      setSelectedGuildId(next);
+    }
+    setWorkspaceRequestsBlocked(selection.status !== 'ready');
     setError(null);
-  }, []);
+  }, [clearScope]);
 
   const restoreSession = useCallback(async () => {
     const epoch = ++generation.current;
     guildController.current?.abort(); pendingGuilds.current = null;
-    clearScope(); setIsRevalidating(false); setStatus('checking'); setGuilds([]); setUser(null);
+    invalidateAuthScope(); setWorkspaceRequestsBlocked(true);
+    setIsRevalidating(false); setStatus('checking'); setGuilds([]); setUser(null);
     try {
       const result = await authApi.session();
       if (epoch !== generation.current) return;
+      if (currentUser.current?.id !== result.user.id) clearScope();
       currentUser.current = result.user;
       tokenStore.set(result); setExpiresAt(result.expiresAt); setUser(result.user);
       applyGuilds(result, result.user, true); setIsRevalidating(false); setStatus('authenticated');
@@ -83,7 +99,7 @@ export function AuthProvider({ children }) {
     const epoch = generation.current;
     const controller = new AbortController();
     guildController.current = controller;
-    clearScope(); setIsRevalidating(true);
+    invalidateRequestScope(); setWorkspaceRequestsBlocked(true); setIsRevalidating(true);
     const task = authApi.guilds({ signal: controller.signal }).then((result) => {
       if (epoch !== generation.current || controller.signal.aborted) return [];
       applyGuilds(result, account);
@@ -100,7 +116,7 @@ export function AuthProvider({ children }) {
     });
     pendingGuilds.current = task;
     return task;
-  }, [applyGuilds, clearScope]);
+  }, [applyGuilds]);
 
   useEffect(() => {
     // OAuth 콜백은 login 응답의 검증된 목록을 그대로 사용한다.
@@ -110,6 +126,10 @@ export function AuthProvider({ children }) {
   }, [restoreSession]);
 
   useEffect(() => onUnauthorized(() => { restoreSession(); }), [restoreSession]);
+  useEffect(() => tokenStore.subscribe(session => {
+    setExpiresAt(session?.expiresAt ?? null);
+    if (session) setRefreshRetry(0);
+  }), []);
   useEffect(() => onGuildAccessChanged(() => { loadGuilds().catch(() => undefined); }), [loadGuilds]);
   useEffect(() => {
     if (status !== 'authenticated') return undefined;
@@ -125,20 +145,17 @@ export function AuthProvider({ children }) {
     const epoch = generation.current;
     const timer = setTimeout(async () => {
       try {
-        const next = await authApi.token();
+        await authApi.token();
         if (epoch !== generation.current) return;
-        const accountId = currentUser.current?.id ?? currentUser.current?.discordUserId;
-        if (next.userId && String(next.userId) !== String(accountId)) { await restoreSession(); return; }
-        tokenStore.set(next); setExpiresAt(next.expiresAt); setRefreshRetry(0);
+        setRefreshRetry(0);
       } catch (err) {
         if (epoch !== generation.current) return;
         const failure = toApiError(err);
-        if (failure.status === 401) resetSession(failure);
-        else setRefreshRetry((n) => n + 1);
+        if (!failure.isCanceled) setRefreshRetry((n) => n + 1);
       }
     }, refreshRetry ? 30000 : Math.max(Date.parse(expiresAt) - Date.now() - REFRESH_BEFORE_MS, 5000));
     return () => clearTimeout(timer);
-  }, [status, expiresAt, refreshRetry, restoreSession, resetSession]);
+  }, [status, expiresAt, refreshRetry]);
 
   useEffect(() => {
     if (!user || isRevalidating || guildSelection.status !== 'ready') return;
@@ -157,7 +174,7 @@ export function AuthProvider({ children }) {
   const completeLogin = useCallback(async ({ code, state }) => {
     const epoch = ++generation.current;
     guildController.current?.abort(); pendingGuilds.current = null;
-    clearScope(); setError(null); setGuilds([]); setUser(null); setStatus('checking-callback');
+    clearScope(true); setWorkspaceRequestsBlocked(true); setError(null); setGuilds([]); setUser(null); setStatus('checking-callback');
     try {
       const result = await authApi.login({ code, state });
       if (epoch !== generation.current) throw new ApiError({ status: 0, code: 'CANCELED' });
@@ -176,14 +193,14 @@ export function AuthProvider({ children }) {
   const logout = useCallback(async () => {
     generation.current++;
     guildController.current?.abort();
-    clearScope(); setStatus('checking'); setGuilds([]); setUser(null);
+    clearScope(true); setWorkspaceRequestsBlocked(true); setStatus('checking'); setGuilds([]); setUser(null);
     try { await authApi.logout(); } catch { /* 로컬 세션은 실패 시에도 비운다. */ }
     finally { resetSession(); }
   }, [clearScope, resetSession]);
 
   const selectGuild = useCallback((id) => {
     if (isRevalidating || !guilds.some((g) => g.id === id) || id === selectedGuildId) return;
-    clearScope(); setSelectedGuildId(id);
+    clearScope(); preferredGuild.current = id; setSelectedGuildId(id);
   }, [clearScope, guilds, isRevalidating, selectedGuildId]);
   const selectedGuild = !isRevalidating && guildSelection.status === 'ready'
     ? guilds.find((g) => g.id === selectedGuildId) ?? null : null;
@@ -201,6 +218,11 @@ export function useAuth() {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth는 <AuthProvider> 안에서만 사용할 수 있습니다.');
   return ctx;
+}
+
+/** Retain the verified workspace's local drafts while its data is hidden for revalidation. */
+export function WorkspaceAuthProvider({ value, children }) {
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
 /**

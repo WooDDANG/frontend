@@ -104,7 +104,7 @@ test('cookie bootstrap and selection revalidation gate stale guild data without 
     await server.listen();
     const port = server.httpServer.address().port;
     const output = await new Promise((resolveOutput, reject) => {
-      const browser = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${profile}`, `http://127.0.0.1:${port}/`], { stdio: 'ignore' });
+      const browser = spawn(process.env.CHROME_EXECUTABLE || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', `--user-data-dir=${profile}`, `http://127.0.0.1:${port}/`], { stdio: 'ignore' });
       browser.on('error', reject);
       browserResult.then(output => { clearTimeout(timer); browser.kill('SIGTERM'); browser.once('close', () => resolveOutput(output)); });
       const timer = setTimeout(() => { browser.kill('SIGKILL'); reject(Error('browser timeout: ' + requests.join(', '))); }, 15000);
@@ -117,6 +117,6 @@ test('cookie bootstrap and selection revalidation gate stale guild data without 
     assert.equal(requests.filter(r => r === 'GET /api/v1/protected').length, 2);
     assert.equal(requests.filter(r => r === 'POST /api/v1/mutation').length, 1);
   } finally {
-    await server.close(); await rm(profile, { recursive: true, force: true });
+    await server.close(); await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
