@@ -25,6 +25,7 @@ export function AuthProvider({ children }) {
   const [guilds, setGuilds] = useState([]);
   const [selectedGuildId, setSelectedGuildId] = useState(null);
   const [guildSelection, setGuildSelection] = useState({ status: 'unavailable', checkedAt: null });
+  const [guildVerification, setGuildVerification] = useState(null);
   const [isRevalidating, setIsRevalidating] = useState(false);
   const [scopeKey, setScopeKey] = useState(0);
   const [error, setError] = useState(null);
@@ -60,6 +61,13 @@ export function AuthProvider({ children }) {
 
   const applyGuilds = useCallback((result, account, restore = false) => {
     const selection = result.guildSelection ?? { status: 'ready', checkedAt: null };
+    const verification = result.guildVerification ?? {
+      status: selection.status === 'ready' ? 'ready' : 'unavailable',
+      retryAt: null,
+      eventCoverage: 'trusted',
+    };
+    setGuildVerification(verification);
+    if (verification.status === 'rate_limited') recovery.current.rateLimited = true;
     const list = selection.status === 'ready' && Array.isArray(result.guilds) ? result.guilds : [];
     setGuildSelection(selection);
     setGuilds(list);
@@ -71,7 +79,7 @@ export function AuthProvider({ children }) {
       setSelectedGuildId(next);
     }
     if (selection.status !== 'ready' && recovery.current.failed.size) recovery.current.blocked = true;
-    setWorkspaceRequestsBlocked(selection.status !== 'ready');
+    setWorkspaceRequestsBlocked(selection.status !== 'ready' || verification.status === 'rate_limited');
     setError(null);
   }, [clearScope]);
 
@@ -110,9 +118,19 @@ export function AuthProvider({ children }) {
     }).catch((err) => {
       if (epoch !== generation.current || controller.signal.aborted) return [];
       if (recovery.current.failed.size) recovery.current.blocked = true;
+      const apiErr = toApiError(err);
+      if (apiErr.status === 429) {
+        recovery.current.rateLimited = true;
+        const retryAfterSec = Number(apiErr.details?.retryAfter ?? (apiErr.details?.retryAfterMs ? apiErr.details.retryAfterMs / 1000 : 30));
+        setGuildVerification({
+          status: 'rate_limited',
+          retryAt: new Date(Date.now() + (Number.isFinite(retryAfterSec) && retryAfterSec > 0 ? retryAfterSec : 30) * 1000).toISOString(),
+          eventCoverage: 'unknown',
+        });
+      }
       setGuilds([]);
       setGuildSelection({ status: 'unavailable', checkedAt: null });
-      setError(toApiError(err));
+      setError(apiErr);
       throw err;
     }).finally(() => {
       if (pendingGuilds.current === task) pendingGuilds.current = null;
@@ -137,6 +155,7 @@ export function AuthProvider({ children }) {
   const retryGuilds = useCallback(() => {
     recovery.current.attempted = recovery.current.failed.size > 0;
     recovery.current.blocked = false;
+    recovery.current.rateLimited = false;
     return loadGuilds();
   }, [loadGuilds]);
   useEffect(() => onGuildAccessChanged((failure, key) => {
@@ -158,7 +177,7 @@ export function AuthProvider({ children }) {
   }), []);
   useEffect(() => {
     if (status !== 'authenticated') return undefined;
-    const refresh = () => { if (!recovery.current.blocked && document.visibilityState !== 'hidden') loadGuilds().catch(() => undefined); };
+    const refresh = () => { if (!recovery.current.blocked && !recovery.current.rateLimited && document.visibilityState !== 'hidden') loadGuilds().catch(() => undefined); };
     window.addEventListener('focus', refresh);
     window.addEventListener('online', refresh);
     return () => { window.removeEventListener('focus', refresh); window.removeEventListener('online', refresh); };
@@ -232,10 +251,10 @@ export function AuthProvider({ children }) {
   const value = useMemo(() => ({
     status, isAuthenticated: status === 'authenticated',
     isChecking: status === 'checking' || status === 'checking-callback',
-    user, guilds, guildSelection, isRevalidating, scopeKey, selectedGuild,
+    user, guilds, guildSelection, guildVerification, isRevalidating, scopeKey, selectedGuild,
     guildId: selectedGuild?.id ?? null, canManage: canManageGuild(selectedGuild), error,
     selectGuild, reloadGuilds: retryGuilds, retrySession: restoreSession, startLogin, completeLogin, logout,
-  }), [status, user, guilds, guildSelection, isRevalidating, scopeKey, selectedGuild, error, selectGuild, retryGuilds, restoreSession, startLogin, completeLogin, logout]);
+  }), [status, user, guilds, guildSelection, guildVerification, isRevalidating, scopeKey, selectedGuild, error, selectGuild, retryGuilds, restoreSession, startLogin, completeLogin, logout]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

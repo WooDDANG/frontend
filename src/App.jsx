@@ -48,6 +48,7 @@ function Root() {
     <div className="full-center"><ErrorState error={auth.error} title="로그인 정보를 확인하지 못했어요" onRetry={auth.retrySession} /></div>
   );
   else if (!auth.isAuthenticated) gate = <Landing />;
+  else if (auth.guildVerification?.status === 'rate_limited') gate = <GuildRateLimitedGate auth={auth} />;
   else if (auth.isRevalidating) gate = <div className="full-center"><LoadingState variant="spinner" label="봇이 설치된 서버를 확인하고 있어요…" /></div>;
   else if (auth.guildSelection.status === 'unavailable') gate = (
     <div className="full-center"><div className="panel api-error" role="alert">
@@ -78,6 +79,58 @@ function Workspace({ auth, route, blocked }) {
           ? <Setup key={snapshot.auth.scopeKey} />
           : <Shell key={snapshot.auth.scopeKey} route={snapshot.route} />}
       </WorkspaceAuthProvider>
+    </div>
+  );
+}
+
+function GuildRateLimitedGate({ auth }) {
+  const [now, setNow] = useState(Date.now());
+  const retryAtMs = auth.guildVerification?.retryAt ? Date.parse(auth.guildVerification.retryAt) : 0;
+  const remainingMs = Math.max(0, retryAtMs - now);
+  const remainingSec = Math.ceil(remainingMs / 1000);
+
+  useEffect(() => {
+    if (remainingMs <= 0) return undefined;
+    const interval = setInterval(() => setNow(Date.now()), 100);
+    return () => clearInterval(interval);
+  }, [remainingMs]);
+
+  const coverageWarning =
+    auth.guildVerification?.eventCoverage === 'disconnected'
+      ? '서버 멤버 변경 확인 연결이 끊겼어요'
+      : auth.guildVerification?.eventCoverage === 'members_intent_disabled'
+      ? '서버 멤버 이벤트 권한이 비활성화되었어요'
+      : auth.guildVerification?.eventCoverage === 'expired'
+      ? '서버 멤버 변경 확인 연결이 만료되었어요'
+      : null;
+
+  return (
+    <div className="full-center">
+      <div className="panel api-error" role="alert">
+        <h2>서버 권한 확인 대기</h2>
+        <p>
+          <span>{auth.user?.name || auth.user?.username || '사용자'}</span>{' '}
+          <span className="badge badge-subtle">로그인됨</span>
+        </p>
+        <p>Discord 요청 제한으로 인해 잠시 서버 권한 확인을 대기 중입니다. 로그인은 유지됩니다.</p>
+        {coverageWarning && <p className="text-warning">{coverageWarning}</p>}
+        {remainingSec > 0 && (
+          <p data-retry-countdown>{remainingSec}초 후 다시 시도할 수 있어요</p>
+        )}
+        <div className="actions" style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={remainingSec > 0}
+            onClick={() => auth.reloadGuilds().catch(() => undefined)}
+          >
+            다시 시도
+          </button>
+          <button type="button" className="btn btn-outline" onClick={auth.logout}>
+            로그아웃
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
