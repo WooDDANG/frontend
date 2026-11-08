@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { invalidateAuthScope, invalidateRequestScope, onGuildAccessChanged, onUnauthorized, setWorkspaceRequestsBlocked } from '../api/client.js';
+import { invalidateAuthScope, invalidateRequestScope, onGuildAccessChanged, onGuildAccessVerified, onUnauthorized, setWorkspaceRequestsBlocked } from '../api/client.js';
 import { authApi } from '../api/endpoints.js';
 import { ApiError, toApiError } from '../api/errors.js';
 import { canManageGuild } from '../api/models.js';
@@ -35,10 +35,12 @@ export function AuthProvider({ children }) {
   const pendingGuilds = useRef(null);
   const guildController = useRef(null);
   const preferredGuild = useRef(null);
+  const recovery = useRef({ attempted: false, blocked: false, failed: new Set() });
 
   const clearScope = useCallback((authenticationChanged = false) => {
     if (authenticationChanged) invalidateAuthScope();
     else invalidateRequestScope();
+    recovery.current = { attempted: false, blocked: false, failed: new Set() };
     setScopeKey((n) => n + 1);
   }, []);
 
@@ -68,6 +70,7 @@ export function AuthProvider({ children }) {
       preferredGuild.current = next;
       setSelectedGuildId(next);
     }
+    if (selection.status !== 'ready' && recovery.current.failed.size) recovery.current.blocked = true;
     setWorkspaceRequestsBlocked(selection.status !== 'ready');
     setError(null);
   }, [clearScope]);
@@ -106,6 +109,7 @@ export function AuthProvider({ children }) {
       return result.guilds;
     }).catch((err) => {
       if (epoch !== generation.current || controller.signal.aborted) return [];
+      if (recovery.current.failed.size) recovery.current.blocked = true;
       setGuilds([]);
       setGuildSelection({ status: 'unavailable', checkedAt: null });
       setError(toApiError(err));
@@ -130,10 +134,31 @@ export function AuthProvider({ children }) {
     setExpiresAt(session?.expiresAt ?? null);
     if (session) setRefreshRetry(0);
   }), []);
-  useEffect(() => onGuildAccessChanged(() => { loadGuilds().catch(() => undefined); }), [loadGuilds]);
+  const retryGuilds = useCallback(() => {
+    recovery.current.attempted = recovery.current.failed.size > 0;
+    recovery.current.blocked = false;
+    return loadGuilds();
+  }, [loadGuilds]);
+  useEffect(() => onGuildAccessChanged((failure, key) => {
+    const episode = recovery.current;
+    episode.failed.add(key);
+    if (episode.attempted) {
+      episode.blocked = true;
+      invalidateRequestScope(); setWorkspaceRequestsBlocked(true);
+      setGuildSelection({ status: 'unavailable', checkedAt: null });
+      setError(failure);
+      return;
+    }
+    episode.attempted = true;
+    loadGuilds().catch(() => undefined);
+  }), [loadGuilds]);
+  useEffect(() => onGuildAccessVerified(key => {
+    const episode = recovery.current;
+    if (!episode.blocked && episode.failed.delete(key) && !episode.failed.size) episode.attempted = false;
+  }), []);
   useEffect(() => {
     if (status !== 'authenticated') return undefined;
-    const refresh = () => { if (document.visibilityState !== 'hidden') loadGuilds().catch(() => undefined); };
+    const refresh = () => { if (!recovery.current.blocked && document.visibilityState !== 'hidden') loadGuilds().catch(() => undefined); };
     window.addEventListener('focus', refresh);
     window.addEventListener('online', refresh);
     return () => { window.removeEventListener('focus', refresh); window.removeEventListener('online', refresh); };
@@ -209,8 +234,8 @@ export function AuthProvider({ children }) {
     isChecking: status === 'checking' || status === 'checking-callback',
     user, guilds, guildSelection, isRevalidating, scopeKey, selectedGuild,
     guildId: selectedGuild?.id ?? null, canManage: canManageGuild(selectedGuild), error,
-    selectGuild, reloadGuilds: loadGuilds, retrySession: restoreSession, startLogin, completeLogin, logout,
-  }), [status, user, guilds, guildSelection, isRevalidating, scopeKey, selectedGuild, error, selectGuild, loadGuilds, restoreSession, startLogin, completeLogin, logout]);
+    selectGuild, reloadGuilds: retryGuilds, retrySession: restoreSession, startLogin, completeLogin, logout,
+  }), [status, user, guilds, guildSelection, isRevalidating, scopeKey, selectedGuild, error, selectGuild, retryGuilds, restoreSession, startLogin, completeLogin, logout]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

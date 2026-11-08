@@ -10,10 +10,11 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Executes real React screens against a controlled HTTP boundary and reports browser assertions. */
 export async function runBrowserFixture({ source, route = '/#/setup', api }) {
+  const profile = await mkdtemp(resolve(tmpdir(), 'ggaddak-screen-'));
   const requests = [];
   let finish;
   const completed = new Promise(resolve => { finish = resolve; });
-  const server = await createServer({ root, configFile: false, appType: 'custom', server: { host: '127.0.0.1', port: 0 }, plugins: [react(), {
+  const server = await createServer({ root, cacheDir: resolve(profile, 'vite-cache'), configFile: false, appType: 'custom', server: { host: '127.0.0.1', port: 0 }, plugins: [react(), {
     name: 'screen-regression-fixture',
     configureServer(vite) {
       vite.middlewares.use(async (req, res, next) => {
@@ -33,7 +34,11 @@ export async function runBrowserFixture({ source, route = '/#/setup', api }) {
           res.end(JSON.stringify({ success: res.statusCode < 400, code: result.code ?? (res.statusCode < 400 ? 'OK' : 'UNAUTHORIZED'), data: result.data })); return;
         }
         if (path !== '/') return next();
-        const html = await vite.transformIndexHtml('/', `<html><body><div id="root"></div><script type="module">
+        const html = await vite.transformIndexHtml('/', `<html><body><div id="root"></div><script>
+          const reportStartupError = message => fetch('/fixture-result',{method:'POST',body:JSON.stringify({passed:false,error:message})});
+          window.addEventListener('error', event => { if(event.message)reportStartupError(event.message); });
+          window.addEventListener('unhandledrejection', event => reportStartupError(event.reason?.message || String(event.reason)));
+        </script><script type="module">
           import React from 'react'; import {createRoot} from 'react-dom/client'; import App from '/src/App.jsx';
           const assert = (ok, message) => { if(!ok)throw Error(message); };
           const wait = async p => { for(let i=0;i<250;i++){if(await p())return;await new Promise(r=>setTimeout(r,20));}throw Error('state timeout: '+document.body.textContent.slice(0,300)); };
@@ -47,7 +52,6 @@ export async function runBrowserFixture({ source, route = '/#/setup', api }) {
       });
     },
   }] });
-  const profile = await mkdtemp(resolve(tmpdir(), 'ggaddak-screen-'));
   let browser;
   let timeout;
   try {

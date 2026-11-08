@@ -20,7 +20,8 @@ test('cookie bootstrap and selection revalidation gate stale guild data without 
   const other = { ...guild, id: 'other', name: '다른 설치 서버' };
   // unavailable에 잘못 섞인 stale 목록도 UI가 방어적으로 제거해야 한다.
   const snapshot = () => ({ guilds: guildReads === 2 ? [] : guildReads >= 3 ? [guild, other] : [guild], guildSelection: { status: [1, 4].includes(guildReads) ? 'unavailable' : 'ready', checkedAt: null } });
-  const server = await createServer({ root, configFile: false, server: { host: '127.0.0.1', port: 0 }, appType: 'custom', plugins: [react(), {
+  const profile = await mkdtemp(resolve(tmpdir(), 'ggaddak-browser-'));
+  const server = await createServer({ root, cacheDir: resolve(profile, 'vite-cache'), configFile: false, server: { host: '127.0.0.1', port: 0 }, appType: 'custom', plugins: [react(), {
     name: 'selection-browser-fixture',
     configureServer(vite) {
       vite.middlewares.use(async (req, res, next) => {
@@ -99,7 +100,6 @@ test('cookie bootstrap and selection revalidation gate stale guild data without 
       });
     },
   }] });
-  const profile = await mkdtemp(resolve(tmpdir(), 'ggaddak-browser-'));
   try {
     await server.listen();
     const port = server.httpServer.address().port;

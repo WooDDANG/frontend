@@ -27,6 +27,8 @@ apiClient.interceptors.request.use((config) => {
 
 const unauthorizedListeners = new Set();
 const guildAccessListeners = new Set();
+const guildVerifiedListeners = new Set();
+const requestKey = config => `${(config.method ?? 'GET').toUpperCase()} ${config.url} ${JSON.stringify(config.params ?? {})}`;
 let scopeVersion = 0;
 let authenticationVersion = 0;
 let tokenRenewal = null;
@@ -68,6 +70,11 @@ export function invalidateAuthScope() { authenticationVersion++; invalidateReque
 export function onGuildAccessChanged(fn) {
   guildAccessListeners.add(fn);
   return () => guildAccessListeners.delete(fn);
+}
+
+export function onGuildAccessVerified(fn) {
+  guildVerifiedListeners.add(fn);
+  return () => guildVerifiedListeners.delete(fn);
 }
 
 /** 로그인 세션이 끊겼을 때(401) 호출될 콜백을 등록한다. */
@@ -113,7 +120,7 @@ export async function request(config) {
       restoreBrowserSession(apiError);
     }
     if (['GUILD_ACCESS_DENIED', 'GUILD_ACCESS_UNAVAILABLE'].includes(apiError.code)) {
-      guildAccessListeners.forEach((fn) => fn(apiError));
+      guildAccessListeners.forEach((fn) => fn(apiError, requestKey(config)));
     }
     throw apiError;
   }
@@ -129,6 +136,7 @@ export async function request(config) {
       details: body?.data ?? null,
     });
   }
+  if (!config.url.startsWith('/api/v1/auth/')) guildVerifiedListeners.forEach(fn => fn(requestKey(config)));
   return body.data;
 }
 
