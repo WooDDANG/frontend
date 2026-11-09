@@ -11,6 +11,7 @@ import Setup from './screens/Setup.jsx';
 import Shell from './screens/Shell.jsx';
 import './app.css';
 import './redesign.css';
+import ServerReadiness from './components/ServerReadiness.jsx';
 
 const isDemo = new URLSearchParams(window.location.search).has('demo');
 
@@ -20,9 +21,11 @@ export default function App() {
 
   return (
     <ToastProvider>
+      <ServerReadiness>
       <AuthProvider>
         <Root />
       </AuthProvider>
+      </ServerReadiness>
     </ToastProvider>
   );
 }
