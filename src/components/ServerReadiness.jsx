@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-/** Wake the API before starting OAuth session restoration or workspace requests. */
+/** OAuth 세션 복원과 작업 공간 요청 전에 서버 연결을 확인한다. */
 export default function ServerReadiness({ children }) {
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState({ ready: false, failed: false, checks: null });
@@ -18,14 +18,21 @@ export default function ServerReadiness({ children }) {
         abort = () => requestController.abort();
         controller.signal.addEventListener('abort', abort, { once: true });
         requestTimer = setTimeout(abort, 15000);
-        const response = await fetch(`${base}/api/health`, {
+        let response = await fetch(`${base}/api/health`, {
           cache: 'no-store',
           signal: requestController.signal,
         });
+        // 이전 서버는 프로세스 상태만 제공한다. 새 readiness API가 배포되면 해당 결과를 사용한다.
+        if (response.status === 404) {
+          response = await fetch(`${base}/health`, {
+            cache: 'no-store',
+            signal: requestController.signal,
+          });
+        }
         const health = await response.json();
         if (controller.signal.aborted) return;
         checks = health.checks;
-        if (response.ok && health.ready === true) {
+        if (response.ok && (health.ready === true || (health.ready === undefined && health.status === 'healthy'))) {
           setState({ ready: true, failed: false, checks });
           return;
         }
