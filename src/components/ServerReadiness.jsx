@@ -18,17 +18,10 @@ export default function ServerReadiness({ children }) {
         abort = () => requestController.abort();
         controller.signal.addEventListener('abort', abort, { once: true });
         requestTimer = setTimeout(abort, 15000);
-        let response = await fetch(`${base}/api/health`, {
+        const response = await fetch(`${base}/health`, {
           cache: 'no-store',
           signal: requestController.signal,
         });
-        // 이전 서버는 프로세스 상태만 제공한다. 새 readiness API가 배포되면 해당 결과를 사용한다.
-        if (response.status === 404) {
-          response = await fetch(`${base}/health`, {
-            cache: 'no-store',
-            signal: requestController.signal,
-          });
-        }
         const health = await response.json();
         if (controller.signal.aborted) return;
         checks = health.checks;
